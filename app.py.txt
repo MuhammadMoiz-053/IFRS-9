@@ -1,0 +1,897 @@
+# Enhanced IFRS 9 Expected Credit Loss (ECL) App
+# Features:
+# 1. Portfolio management with multiple loans
+# 2. Advanced visualization and reporting
+# 3. Scenario analysis
+# 4. Excel export/import
+# 5. Risk classification system
+# 6. Data persistence with session state
+
+import sys
+import pandas as pd
+import numpy as np
+import datetime
+from typing import List, Dict, Optional, Tuple
+
+# --------------------------------------------------
+# ENHANCED CORE IFRS 9 LOGIC
+# --------------------------------------------------
+
+class IFRSEngine:
+    """Enhanced IFRS 9 calculation engine with portfolio capabilities"""
+    
+    @staticmethod
+    def discount_factor(rate: float, year: int) -> float:
+        """Calculate discount factor for given rate and year"""
+        return 1 / ((1 + rate) ** year)
+    
+    @staticmethod
+    def calculate_ecl(
+        exposure: float,
+        lgd: float,
+        interest_rate: float,
+        stage: str,
+        pd_12m: float,
+        annual_pd: Optional[float] = None,
+        lifetime_years: Optional[int] = None,
+        macroeconomic_factor: float = 1.0
+    ) -> float:
+        """Calculate IFRS 9 Expected Credit Loss with macroeconomic adjustments"""
+        
+        # Adjust PD for macroeconomic conditions
+        pd_12m_adj = pd_12m * macroeconomic_factor
+        if annual_pd:
+            annual_pd_adj = annual_pd * macroeconomic_factor
+        else:
+            annual_pd_adj = None
+        
+        if stage == "Stage 1":
+            return exposure * pd_12m_adj * lgd * IFRSEngine.discount_factor(interest_rate, 1)
+        
+        # Stage 2 / Stage 3 – Lifetime ECL
+        if annual_pd_adj is None or lifetime_years is None:
+            raise ValueError("annual_pd and lifetime_years are required for lifetime ECL")
+        
+        ecl = 0.0
+        for year in range(1, lifetime_years + 1):
+            ecl += (exposure * annual_pd_adj * lgd * 
+                   IFRSEngine.discount_factor(interest_rate, year))
+        
+        return ecl
+    
+    @staticmethod
+    def classify_stage(pd_12m: float, credit_rating: str, days_past_due: int) -> str:
+        """Determine IFRS 9 stage based on credit parameters"""
+        if days_past_due > 90:
+            return "Stage 3"
+        elif pd_12m > 0.05 or credit_rating in ["CCC", "CC", "C", "D"]:
+            return "Stage 2"
+        else:
+            return "Stage 1"
+    
+    @staticmethod
+    def calculate_ecl_provision(portfolio_ecl: float, current_provision: float) -> float:
+        """Calculate required provision adjustment"""
+        return portfolio_ecl - current_provision
+
+# --------------------------------------------------
+# LOAN PORTFOLIO CLASS
+# --------------------------------------------------
+
+class LoanPortfolio:
+    """Manages portfolio of loans and calculates aggregate ECL"""
+    
+    def __init__(self):
+        self.loans = []
+        self.portfolio_summary = {}
+    
+    def add_loan(self, loan_data: Dict):
+        """Add a loan to the portfolio"""
+        loan_id = f"LOAN_{len(self.loans) + 1:03d}"
+        loan_data['loan_id'] = loan_id
+        loan_data['added_date'] = datetime.datetime.now()
+        self.loans.append(loan_data)
+        return loan_id
+    
+    def remove_loan(self, loan_id: str):
+        """Remove a loan from portfolio"""
+        self.loans = [loan for loan in self.loans if loan.get('loan_id') != loan_id]
+    
+    def calculate_portfolio_ecl(self) -> Dict:
+        """Calculate ECL for entire portfolio"""
+        if not self.loans:
+            return {}
+        
+        total_ecl = 0
+        stage_counts = {"Stage 1": 0, "Stage 2": 0, "Stage 3": 0}
+        stage_ecl = {"Stage 1": 0, "Stage 2": 0, "Stage 3": 0}
+        sector_exposure = {}
+        
+        for loan in self.loans:
+            ecl = loan.get('ecl', 0)
+            total_ecl += ecl
+            stage = loan.get('stage', 'Stage 1')
+            stage_counts[stage] += 1
+            stage_ecl[stage] += ecl
+            
+            # Track sector exposure
+            sector = loan.get('sector', 'Other')
+            if sector not in sector_exposure:
+                sector_exposure[sector] = 0
+            sector_exposure[sector] += loan.get('exposure', 0)
+        
+        self.portfolio_summary = {
+            'total_loans': len(self.loans),
+            'total_exposure': sum(loan.get('exposure', 0) for loan in self.loans),
+            'total_ecl': total_ecl,
+            'ecl_ratio': total_ecl / sum(loan.get('exposure', 0) for loan in self.loans) 
+                         if sum(loan.get('exposure', 0) for loan in self.loans) > 0 else 0,
+            'stage_distribution': stage_counts,
+            'stage_ecl': stage_ecl,
+            'sector_exposure': sector_exposure
+        }
+        
+        return self.portfolio_summary
+    
+    def get_loans_dataframe(self) -> pd.DataFrame:
+        """Convert loans to DataFrame for display"""
+        if not self.loans:
+            return pd.DataFrame()
+        
+        df = pd.DataFrame(self.loans)
+        # Format numeric columns
+        numeric_cols = ['exposure', 'ecl', 'pd_12m', 'annual_pd', 'lgd', 'interest_rate']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        return df
+
+# --------------------------------------------------
+# TRY STREAMLIT MODE
+# --------------------------------------------------
+
+try:
+    import streamlit as st
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from io import BytesIO
+    
+    st.set_page_config(
+        page_title="IFRS 9 ECL Calculator Pro",
+        layout="wide",
+        page_icon="📊"
+    )
+    
+    # Initialize session state
+    if 'portfolio' not in st.session_state:
+        st.session_state.portfolio = LoanPortfolio()
+    if 'scenarios' not in st.session_state:
+        st.session_state.scenarios = []
+    
+    # Custom CSS for better styling
+    st.markdown("""
+    <style>
+    .main-header {
+        font-size: 2.5rem;
+        color: #1E3A8A;
+        margin-bottom: 1rem;
+    }
+    .sub-header {
+        font-size: 1.5rem;
+        color: #374151;
+        margin-top: 1.5rem;
+        margin-bottom: 1rem;
+    }
+    .metric-card {
+        background-color: #F3F4F6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #3B82F6;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Sidebar Navigation
+    st.sidebar.title("🔍 Navigation")
+    app_mode = st.sidebar.radio(
+        "Select Mode",
+        ["📝 Add New Loan", "📊 Portfolio Overview", "📈 Advanced Analysis", 
+         "🎯 Scenario Analysis", "📤 Import/Export"]
+    )
+    
+    st.sidebar.markdown("---")
+    st.sidebar.info("""
+    **IFRS 9 Stages:**
+    - **Stage 1:** Performing assets
+    - **Stage 2:** Significant credit deterioration
+    - **Stage 3:** Credit impaired
+    """)
+    
+    # Main Title
+    st.markdown('<h1 class="main-header">📊 IFRS 9 Expected Credit Loss Calculator Pro</h1>', unsafe_allow_html=True)
+    
+    # ENGINE INSTANCE
+    engine = IFRSEngine()
+    
+    # MODE 1: ADD NEW LOAN
+    if app_mode == "📝 Add New Loan":
+        st.markdown('<h2 class="sub-header">Add New Loan to Portfolio</h2>', unsafe_allow_html=True)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Loan Details")
+            loan_name = st.text_input("Loan Name/Identifier", "Corporate Loan XYZ")
+            exposure = st.number_input("Exposure at Default (EAD)", 
+                                     min_value=0.0, 
+                                     value=100000.0,
+                                     step=10000.0)
+            sector = st.selectbox("Business Sector", 
+                                ["Financial Services", "Manufacturing", 
+                                 "Retail", "Technology", "Healthcare", 
+                                 "Energy", "Real Estate", "Other"])
+            collateral_value = st.number_input("Collateral Value", min_value=0.0, 
+                                             value=50000.0, step=5000.0)
+        
+        with col2:
+            st.subheader("Credit Parameters")
+            pd_12m = st.slider("12-Month PD", 0.0, 1.0, 0.02, 0.01, 
+                             format="%.3f")
+            lgd = st.slider("Loss Given Default (LGD)", 0.0, 1.0, 0.45, 0.01,
+                          format="%.2f")
+            interest_rate = st.number_input("Effective Interest Rate (%)", 
+                                          min_value=0.0, 
+                                          value=10.0, 
+                                          step=0.5) / 100
+            
+            days_past_due = st.number_input("Days Past Due", min_value=0, 
+                                          value=0, step=5)
+            credit_rating = st.selectbox("Credit Rating", 
+                                       ["AAA", "AA", "A", "BBB", "BB", 
+                                        "B", "CCC", "CC", "C", "D"])
+        
+        # Stage determination
+        stage = engine.classify_stage(pd_12m, credit_rating, days_past_due)
+        st.info(f"**Automatically Classified as:** {stage}")
+        
+        # Lifetime parameters (if Stage 2 or 3)
+        col3, col4 = st.columns(2)
+        with col3:
+            lifetime_years = None
+            annual_pd = None
+            
+            if stage != "Stage 1":
+                lifetime_years = st.slider("Remaining Lifetime (years)", 
+                                         1, 30, 5)
+                annual_pd = st.slider("Annual PD", 0.0, 1.0, 0.05, 0.01,
+                                    format="%.3f")
+        
+        with col4:
+            st.subheader("Macroeconomic Factors")
+            macroeconomic_factor = st.slider("Macroeconomic Adjustment Factor", 
+                                           0.5, 2.0, 1.0, 0.1,
+                                           help="Factor to adjust PD based on economic conditions")
+        
+        # Calculate ECL
+        ecl = engine.calculate_ecl(
+            exposure=exposure,
+            lgd=lgd,
+            interest_rate=interest_rate,
+            stage=stage,
+            pd_12m=pd_12m,
+            annual_pd=annual_pd,
+            lifetime_years=lifetime_years,
+            macroeconomic_factor=macroeconomic_factor
+        )
+        
+        # Collateral adjusted LGD
+        collateral_ratio = collateral_value / exposure if exposure > 0 else 0
+        adjusted_lgd = max(0, lgd - collateral_ratio)
+        
+        st.metric("Expected Credit Loss (ECL)", f"${ecl:,.2f}")
+        st.metric("ECL Ratio", f"{(ecl/exposure*100):.2f}%" if exposure > 0 else "0%")
+        
+        # Add to portfolio button
+        if st.button("➕ Add Loan to Portfolio", type="primary"):
+            loan_data = {
+                'loan_name': loan_name,
+                'exposure': exposure,
+                'sector': sector,
+                'collateral_value': collateral_value,
+                'pd_12m': pd_12m,
+                'lgd': lgd,
+                'adjusted_lgd': adjusted_lgd,
+                'interest_rate': interest_rate,
+                'stage': stage,
+                'annual_pd': annual_pd,
+                'lifetime_years': lifetime_years,
+                'days_past_due': days_past_due,
+                'credit_rating': credit_rating,
+                'ecl': ecl,
+                'ecl_ratio': ecl/exposure if exposure > 0 else 0,
+                'macroeconomic_factor': macroeconomic_factor
+            }
+            
+            loan_id = st.session_state.portfolio.add_loan(loan_data)
+            st.success(f"✅ Loan '{loan_name}' added to portfolio with ID: {loan_id}")
+            st.rerun()
+    
+    # MODE 2: PORTFOLIO OVERVIEW
+    elif app_mode == "📊 Portfolio Overview":
+        st.markdown('<h2 class="sub-header">Portfolio Overview</h2>', unsafe_allow_html=True)
+        
+        portfolio = st.session_state.portfolio
+        
+        if portfolio.loans:
+            # Calculate portfolio metrics
+            summary = portfolio.calculate_portfolio_ecl()
+            df = portfolio.get_loans_dataframe()
+            
+            # Portfolio KPIs
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Loans", summary['total_loans'])
+            with col2:
+                st.metric("Total Exposure", f"${summary['total_exposure']:,.0f}")
+            with col3:
+                st.metric("Total ECL", f"${summary['total_ecl']:,.0f}")
+            with col4:
+                st.metric("ECL Ratio", f"{summary['ecl_ratio']*100:.2f}%")
+            
+            # Stage Distribution
+            st.subheader("Stage Distribution")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig1 = px.pie(
+                    values=list(summary['stage_distribution'].values()),
+                    names=list(summary['stage_distribution'].keys()),
+                    title="Number of Loans by Stage",
+                    color_discrete_sequence=px.colors.qualitative.Set3
+                )
+                st.plotly_chart(fig1, use_container_width=True)
+            
+            with col2:
+                fig2 = px.bar(
+                    x=list(summary['stage_ecl'].keys()),
+                    y=list(summary['stage_ecl'].values()),
+                    title="ECL by Stage",
+                    labels={'x': 'Stage', 'y': 'ECL ($)'},
+                    color=list(summary['stage_ecl'].keys()),
+                    color_discrete_sequence=px.colors.qualitative.Set2
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+            
+            # Portfolio Details Table
+            st.subheader("Portfolio Details")
+            st.dataframe(df.style.format({
+                'exposure': '${:,.0f}',
+                'ecl': '${:,.2f}',
+                'ecl_ratio': '{:.2%}',
+                'pd_12m': '{:.3f}',
+                'lgd': '{:.2f}',
+                'interest_rate': '{:.2%}'
+            }), use_container_width=True)
+            
+            # Export options
+            st.subheader("Export Options")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # CSV Export
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download CSV",
+                    data=csv,
+                    file_name=f"ifrs9_portfolio_{datetime.datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
+            
+            with col2:
+                # Excel Export
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df.to_excel(writer, sheet_name='Portfolio', index=False)
+                    # Add summary sheet
+                    summary_df = pd.DataFrame([summary])
+                    summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                
+                st.download_button(
+                    label="📥 Download Excel",
+                    data=output.getvalue(),
+                    file_name=f"ifrs9_full_report_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            
+            # Portfolio Management
+            st.subheader("Portfolio Management")
+            if st.button("🗑️ Clear Entire Portfolio", type="secondary"):
+                st.session_state.portfolio = LoanPortfolio()
+                st.success("Portfolio cleared!")
+                st.rerun()
+        
+        else:
+            st.info("📭 No loans in portfolio. Add loans using the 'Add New Loan' tab.")
+    
+    # MODE 3: ADVANCED ANALYSIS
+    elif app_mode == "📈 Advanced Analysis":
+        st.markdown('<h2 class="sub-header">Advanced Portfolio Analysis</h2>', unsafe_allow_html=True)
+        
+        portfolio = st.session_state.portfolio
+        
+        if portfolio.loans:
+            df = portfolio.get_loans_dataframe()
+            summary = portfolio.calculate_portfolio_ecl()
+            
+            # Risk Heatmap
+            st.subheader("Risk Heatmap by Sector and Stage")
+            
+            if 'sector' in df.columns and 'stage' in df.columns:
+                heatmap_data = df.pivot_table(
+                    values='ecl_ratio',
+                    index='sector',
+                    columns='stage',
+                    aggfunc='mean',
+                    fill_value=0
+                )
+                
+                fig = px.imshow(
+                    heatmap_data,
+                    title="ECL Ratio Heatmap (Sector × Stage)",
+                    color_continuous_scale="RdYlGn_r",
+                    labels=dict(color="ECL Ratio")
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Concentration Analysis
+            st.subheader("Exposure Concentration")
+            
+            if 'sector' in df.columns:
+                sector_exposure = df.groupby('sector')['exposure'].sum().reset_index()
+                fig = px.treemap(
+                    sector_exposure,
+                    path=['sector'],
+                    values='exposure',
+                    title="Portfolio Exposure by Sector",
+                    color='exposure',
+                    color_continuous_scale='Blues'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # ECL Sensitivity Analysis
+            st.subheader("ECL Sensitivity Analysis")
+            
+            sensitivity_factor = st.slider(
+                "PD Sensitivity Factor", 
+                0.5, 2.0, 1.0, 0.1,
+                help="Factor to stress test PD changes"
+            )
+            
+            # Calculate stressed ECL
+            stressed_ecl = 0
+            for loan in portfolio.loans:
+                stressed_pd = loan['pd_12m'] * sensitivity_factor
+                stressed_annual_pd = loan.get('annual_pd', loan['pd_12m']) * sensitivity_factor
+                
+                ecl = engine.calculate_ecl(
+                    exposure=loan['exposure'],
+                    lgd=loan['lgd'],
+                    interest_rate=loan['interest_rate'],
+                    stage=loan['stage'],
+                    pd_12m=stressed_pd,
+                    annual_pd=stressed_annual_pd,
+                    lifetime_years=loan.get('lifetime_years'),
+                    macroeconomic_factor=loan.get('macroeconomic_factor', 1.0)
+                )
+                stressed_ecl += ecl
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Base Case ECL", f"${summary['total_ecl']:,.0f}")
+            with col2:
+                st.metric(f"Stressed ECL (PD × {sensitivity_factor})", 
+                         f"${stressed_ecl:,.0f}",
+                         delta=f"{(stressed_ecl - summary['total_ecl']):,.0f}")
+        
+        else:
+            st.info("No data available for analysis. Add loans to the portfolio first.")
+    
+    # MODE 4: SCENARIO ANALYSIS
+    elif app_mode == "🎯 Scenario Analysis":
+        st.markdown('<h2 class="sub-header">Scenario Analysis</h2>', unsafe_allow_html=True)
+        
+        st.write("Compare different macroeconomic scenarios and their impact on ECL")
+        
+        # Define scenarios
+        scenarios = [
+            {"name": "Base Case", "pd_factor": 1.0, "lgd_factor": 1.0, "growth_factor": 1.0},
+            {"name": "Economic Downturn", "pd_factor": 1.5, "lgd_factor": 1.2, "growth_factor": 0.8},
+            {"name": "Severe Recession", "pd_factor": 2.0, "lgd_factor": 1.5, "growth_factor": 0.6},
+            {"name": "Economic Recovery", "pd_factor": 0.8, "lgd_factor": 0.9, "growth_factor": 1.2},
+        ]
+        
+        scenario_results = []
+        
+        for scenario in scenarios:
+            total_ecl = 0
+            total_exposure = 0
+            
+            for loan in st.session_state.portfolio.loans:
+                adjusted_pd = loan['pd_12m'] * scenario['pd_factor']
+                adjusted_lgd = loan['lgd'] * scenario['lgd_factor']
+                
+                if loan['stage'] != "Stage 1":
+                    adjusted_annual_pd = loan.get('annual_pd', loan['pd_12m']) * scenario['pd_factor']
+                else:
+                    adjusted_annual_pd = None
+                
+                ecl = engine.calculate_ecl(
+                    exposure=loan['exposure'] * scenario['growth_factor'],
+                    lgd=adjusted_lgd,
+                    interest_rate=loan['interest_rate'],
+                    stage=loan['stage'],
+                    pd_12m=adjusted_pd,
+                    annual_pd=adjusted_annual_pd,
+                    lifetime_years=loan.get('lifetime_years'),
+                    macroeconomic_factor=scenario['pd_factor']
+                )
+                
+                total_ecl += ecl
+                total_exposure += loan['exposure'] * scenario['growth_factor']
+            
+            scenario_results.append({
+                'Scenario': scenario['name'],
+                'Total Exposure': total_exposure,
+                'Total ECL': total_ecl,
+                'ECL Ratio': total_ecl / total_exposure if total_exposure > 0 else 0,
+                'PD Factor': scenario['pd_factor'],
+                'LGD Factor': scenario['lgd_factor']
+            })
+        
+        results_df = pd.DataFrame(scenario_results)
+        
+        # Display results
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.dataframe(results_df.style.format({
+                'Total Exposure': '${:,.0f}',
+                'Total ECL': '${:,.0f}',
+                'ECL Ratio': '{:.2%}',
+                'PD Factor': '{:.1f}',
+                'LGD Factor': '{:.1f}'
+            }), use_container_width=True)
+        
+        with col2:
+            fig = px.bar(
+                results_df,
+                x='Scenario',
+                y='ECL Ratio',
+                title='ECL Ratio by Scenario',
+                color='Scenario',
+                text='ECL Ratio'
+            )
+            fig.update_traces(texttemplate='%{text:.2%}', textposition='outside')
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Save scenario
+        if st.button("💾 Save Current Scenario", type="secondary"):
+            st.session_state.scenarios.append({
+                'timestamp': datetime.datetime.now(),
+                'results': results_df.to_dict('records')
+            })
+            st.success("Scenario saved!")
+    
+    # MODE 5: IMPORT/EXPORT
+    elif app_mode == "📤 Import/Export":
+        st.markdown('<h2 class="sub-header">Import/Export Data</h2>', unsafe_allow_html=True)
+        
+        tab1, tab2, tab3 = st.tabs(["📤 Export", "📥 Import", "🔄 Templates"])
+        
+        with tab1:
+            st.subheader("Export Portfolio Data")
+            
+            if st.session_state.portfolio.loans:
+                df = st.session_state.portfolio.get_loans_dataframe()
+                
+                # Export formats
+                export_format = st.radio(
+                    "Select Export Format",
+                    ["CSV", "Excel", "JSON"]
+                )
+                
+                if export_format == "CSV":
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="Download CSV",
+                        data=csv,
+                        file_name="ifrs9_portfolio.csv",
+                        mime="text/csv"
+                    )
+                elif export_format == "Excel":
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        df.to_excel(writer, index=False)
+                    st.download_button(
+                        label="Download Excel",
+                        data=output.getvalue(),
+                        file_name="ifrs9_portfolio.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:  # JSON
+                    json_str = df.to_json(orient='records', indent=2)
+                    st.download_button(
+                        label="Download JSON",
+                        data=json_str,
+                        file_name="ifrs9_portfolio.json",
+                        mime="application/json"
+                    )
+                
+                # Preview
+                st.subheader("Data Preview")
+                st.dataframe(df.head())
+            else:
+                st.info("No portfolio data to export")
+        
+        with tab2:
+            st.subheader("Import Portfolio Data")
+            
+            uploaded_file = st.file_uploader(
+                "Choose a file",
+                type=['csv', 'xlsx', 'xls', 'json']
+            )
+            
+            if uploaded_file is not None:
+                try:
+                    if uploaded_file.name.endswith('.csv'):
+                        df = pd.read_csv(uploaded_file)
+                    elif uploaded_file.name.endswith(('.xlsx', '.xls')):
+                        df = pd.read_excel(uploaded_file)
+                    else:  # JSON
+                        df = pd.read_json(uploaded_file)
+                    
+                    st.success(f"Successfully loaded {len(df)} records")
+                    st.dataframe(df.head())
+                    
+                    # Map columns
+                    st.subheader("Column Mapping")
+                    
+                    required_cols = ['exposure', 'pd_12m', 'lgd', 'interest_rate']
+                    available_cols = df.columns.tolist()
+                    
+                    col_mapping = {}
+                    for req_col in required_cols:
+                        selected = st.selectbox(
+                            f"Select column for '{req_col}'",
+                            options=[''] + available_cols,
+                            key=f"map_{req_col}"
+                        )
+                        if selected:
+                            col_mapping[req_col] = selected
+                    
+                    if st.button("Import Data", type="primary"):
+                        if all(col in col_mapping for col in required_cols):
+                            # Import logic
+                            imported_count = 0
+                            for _, row in df.iterrows():
+                                try:
+                                    loan_data = {
+                                        'loan_name': str(row.get('loan_name', f"Imported_{imported_count+1}")),
+                                        'exposure': float(row[col_mapping['exposure']]),
+                                        'pd_12m': float(row[col_mapping['pd_12m']]),
+                                        'lgd': float(row[col_mapping['lgd']]),
+                                        'interest_rate': float(row[col_mapping['interest_rate']])/100 
+                                                         if row[col_mapping['interest_rate']] > 1 
+                                                         else float(row[col_mapping['interest_rate']]),
+                                        'sector': str(row.get('sector', 'Other')),
+                                        'stage': str(row.get('stage', 'Stage 1')),
+                                        'credit_rating': str(row.get('credit_rating', 'BBB')),
+                                        'days_past_due': int(row.get('days_past_due', 0))
+                                    }
+                                    
+                                    # Calculate ECL
+                                    ecl = engine.calculate_ecl(**loan_data)
+                                    loan_data['ecl'] = ecl
+                                    
+                                    st.session_state.portfolio.add_loan(loan_data)
+                                    imported_count += 1
+                                    
+                                except Exception as e:
+                                    st.warning(f"Error importing row: {e}")
+                                    continue
+                            
+                            st.success(f"Successfully imported {imported_count} loans")
+                            st.rerun()
+                        else:
+                            st.error("Please map all required columns")
+                
+                except Exception as e:
+                    st.error(f"Error reading file: {str(e)}")
+        
+        with tab3:
+            st.subheader("Download Template")
+            
+            template_data = {
+                'loan_name': ['Sample Loan 1', 'Sample Loan 2'],
+                'exposure': [100000, 50000],
+                'pd_12m': [0.02, 0.05],
+                'lgd': [0.45, 0.60],
+                'interest_rate': [0.10, 0.12],
+                'sector': ['Manufacturing', 'Retail'],
+                'stage': ['Stage 1', 'Stage 2'],
+                'annual_pd': [None, 0.08],
+                'lifetime_years': [None, 5],
+                'credit_rating': ['A', 'BB'],
+                'days_past_due': [0, 30]
+            }
+            
+            template_df = pd.DataFrame(template_data)
+            
+            csv_template = template_df.to_csv(index=False)
+            st.download_button(
+                label="Download CSV Template",
+                data=csv_template,
+                file_name="ifrs9_template.csv",
+                mime="text/csv"
+            )
+            
+            st.info("Template includes all required fields for import")
+            st.dataframe(template_df)
+
+except ModuleNotFoundError:
+    # --------------------------------------------------
+    # NON-INTERACTIVE FALLBACK MODE (Sandbox safe)
+    # --------------------------------------------------
+    print("IFRS 9 ECL Calculator Pro – Fallback Mode")
+    print("=" * 50)
+    
+    engine = IFRSEngine()
+    portfolio = LoanPortfolio()
+    
+    # Sample loans
+    sample_loans = [
+        {
+            'loan_name': 'Corporate Bond A',
+            'exposure': 1000000,
+            'pd_12m': 0.015,
+            'lgd': 0.40,
+            'interest_rate': 0.08,
+            'sector': 'Financial Services',
+            'stage': 'Stage 1',
+            'credit_rating': 'A',
+            'days_past_due': 0
+        },
+        {
+            'loan_name': 'Retail Loan B',
+            'exposure': 500000,
+            'pd_12m': 0.08,
+            'lgd': 0.55,
+            'interest_rate': 0.12,
+            'sector': 'Retail',
+            'stage': 'Stage 2',
+            'annual_pd': 0.10,
+            'lifetime_years': 3,
+            'credit_rating': 'BB',
+            'days_past_due': 45
+        },
+        {
+            'loan_name': 'Manufacturing Loan C',
+            'exposure': 750000,
+            'pd_12m': 0.25,
+            'lgd': 0.70,
+            'interest_rate': 0.15,
+            'sector': 'Manufacturing',
+            'stage': 'Stage 3',
+            'annual_pd': 0.30,
+            'lifetime_years': 2,
+            'credit_rating': 'CCC',
+            'days_past_due': 120
+        }
+    ]
+    
+    # Add sample loans and calculate ECL
+    print("Sample Portfolio Analysis:")
+    print("-" * 30)
+    
+    for loan_data in sample_loans:
+        # Calculate ECL
+        ecl = engine.calculate_ecl(
+            exposure=loan_data['exposure'],
+            lgd=loan_data['lgd'],
+            interest_rate=loan_data['interest_rate'],
+            stage=loan_data['stage'],
+            pd_12m=loan_data['pd_12m'],
+            annual_pd=loan_data.get('annual_pd'),
+            lifetime_years=loan_data.get('lifetime_years')
+        )
+        loan_data['ecl'] = ecl
+        portfolio.add_loan(loan_data)
+        
+        print(f"\nLoan: {loan_data['loan_name']}")
+        print(f"  Stage: {loan_data['stage']}")
+        print(f"  Exposure: ${loan_data['exposure']:,.0f}")
+        print(f"  ECL: ${ecl:,.2f}")
+        print(f"  ECL Ratio: {(ecl/loan_data['exposure']*100):.2f}%")
+    
+    # Portfolio summary
+    summary = portfolio.calculate_portfolio_ecl()
+    print("\n" + "=" * 50)
+    print("PORTFOLIO SUMMARY:")
+    print("=" * 50)
+    print(f"Total Loans: {summary['total_loans']}")
+    print(f"Total Exposure: ${summary['total_exposure']:,.0f}")
+    print(f"Total ECL: ${summary['total_ecl']:,.2f}")
+    print(f"Portfolio ECL Ratio: {(summary['ecl_ratio']*100):.2f}%")
+    print(f"\nStage Distribution:")
+    for stage, count in summary['stage_distribution'].items():
+        print(f"  {stage}: {count} loans (${summary['stage_ecl'][stage]:,.0f} ECL)")
+    
+    print("\n" + "=" * 50)
+    print("SCENARIO ANALYSIS:")
+    print("=" * 50)
+    
+    # Run scenarios
+    scenarios = [
+        ("Base Case", 1.0),
+        ("Economic Downturn (+50% PD)", 1.5),
+        ("Severe Recession (+100% PD)", 2.0)
+    ]
+    
+    for scenario_name, pd_factor in scenarios:
+        scenario_ecl = 0
+        for loan in portfolio.loans:
+            adjusted_pd = loan['pd_12m'] * pd_factor
+            adjusted_annual_pd = loan.get('annual_pd', loan['pd_12m']) * pd_factor
+            
+            ecl = engine.calculate_ecl(
+                exposure=loan['exposure'],
+                lgd=loan['lgd'],
+                interest_rate=loan['interest_rate'],
+                stage=loan['stage'],
+                pd_12m=adjusted_pd,
+                annual_pd=adjusted_annual_pd,
+                lifetime_years=loan.get('lifetime_years')
+            )
+            scenario_ecl += ecl
+        
+        print(f"\n{scenario_name}:")
+        print(f"  Total ECL: ${scenario_ecl:,.2f}")
+        print(f"  ECL Ratio: {(scenario_ecl/summary['total_exposure']*100):.2f}%")
+        print(f"  Change: {(scenario_ecl - summary['total_ecl']):,.2f} " +
+              f"({(scenario_ecl/summary['total_ecl']-1)*100:+.1f}%)")
+    
+    # Run tests
+    print("\n" + "=" * 50)
+    print("RUNNING VALIDATION TESTS:")
+    print("=" * 50)
+    
+    try:
+        # Test 1: Stage 1 calculation
+        test_ecl = engine.calculate_ecl(100000, 0.5, 0.1, "Stage 1", 0.02)
+        assert test_ecl > 0, "Stage 1 ECL should be positive"
+        print("✓ Test 1: Stage 1 ECL calculation passed")
+        
+        # Test 2: Stage 2 > Stage 1 for same exposure
+        ecl1 = engine.calculate_ecl(100000, 0.5, 0.1, "Stage 1", 0.02)
+        ecl2 = engine.calculate_ecl(100000, 0.5, 0.1, "Stage 2", 0.02, 0.05, 5)
+        assert ecl2 > ecl1, "Stage 2 ECL should be greater than Stage 1"
+        print("✓ Test 2: Stage comparison passed")
+        
+        # Test 3: Zero PD gives zero ECL
+        zero_ecl = engine.calculate_ecl(100000, 0.5, 0.1, "Stage 1", 0.0)
+        assert abs(zero_ecl) < 0.0001, "Zero PD should give zero ECL"
+        print("✓ Test 3: Zero PD scenario passed")
+        
+        # Test 4: Stage classification
+        assert engine.classify_stage(0.01, "A", 0) == "Stage 1"
+        assert engine.classify_stage(0.06, "A", 0) == "Stage 2"
+        assert engine.classify_stage(0.01, "A", 95) == "Stage 3"
+        print("✓ Test 4: Stage classification passed")
+        
+        print("\n✅ All tests passed successfully!")
+        
+    except AssertionError as e:
+        print(f"❌ Test failed: {e}")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
